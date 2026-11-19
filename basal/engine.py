@@ -1283,8 +1283,10 @@ class StateCache:
 
     def longest(self, tokens, usable=None, use=None):
         """The longest cached prefix -> (key, KV, matched length, state length), or None.
-        usable(KV, matched length, state length) may reject a match whose KV cannot continue it. use(key): whether the
-        caller will continue the found entry (a prefix hit is counted only then; default: yes)."""
+        usable(KV, matched length, state length) may reject a match whose KV cannot continue it.
+        use(key, matched length, state length): whether the caller will reuse the found entry (a prefix hit is counted
+        only then; default: yes). It takes the match, because what a caller reuses depends on it: the counter then
+        reports prefixes reused rather than matches found."""
         t = np.asarray(tokens, dtype=np.int64)
         blocks = self._blocks(t)
         rejected = set() if usable is not None else ()
@@ -1319,7 +1321,7 @@ class StateCache:
                             break
                 if best is not None:
                     self.entries.move_to_end(best[0])
-                    self.prefix_hits += use is None or bool(use(best[0]))
+                    self.prefix_hits += use is None or bool(use(best[0], best[2], best[3]))
                     break
             else:
                 return None
@@ -2216,14 +2218,18 @@ class GraphBackend(EagerBackend):
                 continue
             pk = units[k][0]
             root = list(pk[0][: pk[2].index(1)])
-            found = self.state_cache.longest(root, self._usable if self.gemma is not None else None)
+            # the one condition under which the continuation below reuses the entry: it is both the guard and what
+            # counts the prefix hit, so a prefix hit is a prefix reused. A match of the whole root has no tokens left
+            # to continue, which covers an entry an earlier unit of this call cached.
+            reuses = lambda _key, match, _total: self.state_cache.BLOCK <= match < len(root)
+            found = self.state_cache.longest(root, usable=self._usable if self.gemma is not None else None, use=reuses)
             if found is None:
                 continue
             old, kv, m, n = found
-            if old == key:  # cached by an earlier unit of this call
+            if old == key:  # cached by an earlier unit of this call; _cache_keys counted that lookup as a miss
                 hits[k] = kv
                 continue
-            if m < self.state_cache.BLOCK or m >= len(root):
+            if not reuses(old, m, n):
                 continue
             prefix = []
             for (ck, cv), t in zip(kv, self.gemma.kv_lens(n) if self.gemma is not None else [n] * len(kv)):
@@ -4200,13 +4206,27 @@ class MLXBackend(Capable):
         kv = cache.get(key)
         if kv is not None:
             return kv
-        initial, replaces = None, None
-        found = cache.longest(root, use=same_bits)
+        initial, replaces, reused = None, None, False
+
+        def continues(match):
+            """Whether the root has tokens past the match, so continuing the entry is shorter than computing the
+            root afresh (below BLOCK tokens the cache does not match at all)."""
+            return cache.BLOCK <= match < len(root)
+
+        def reuses(old_key, match, _total):
+            """Whether this request continues the entry, which is what a prefix hit counts: its rows must have the
+            bits this request's uncached forward gives them. same_bits is asked here, under the cache's lock, and
+            its answer is read below instead of asking again."""
+            nonlocal reused
+            reused = same_bits(old_key) and continues(match)
+            return reused
+
+        found = cache.longest(root, use=reuses)
         if found is not None:
             old, pkv, m, n = found
-            if cache.BLOCK <= m < len(root):
+            if continues(m):
                 replaces = old if m == n else None
-                if same_bits(old):
+                if reused:
                     initial = [(k[..., :m, :], v[..., :m, :]) for k, v in pkv]
         kv = [(mx.contiguous(k), mx.contiguous(v)) for k, v in self._prefix(root, initial, ref)]
         mx.eval(kv)

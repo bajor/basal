@@ -134,10 +134,10 @@ def test_growing_and_edited_states_reuse_the_cached_prefix():
     s2 = s1 + [rnd.randrange(3, 50) for _ in range(9)]                  # the trace grows
     check(be, requests(rnd, s2, 2))
     st = be.state_cache.stats()
-    assert st["prefix_hits"] >= 1 and st["entries"] == 1               # s2 replaced s1
+    assert st["prefix_hits"] == 1 and st["entries"] == 1               # s2 replaced s1
     s3 = s2[:22] + [rnd.randrange(3, 50) for _ in range(15)]            # edited after token 22
     check(be, requests(rnd, s3, 1))
-    assert be.state_cache.stats()["prefix_hits"] >= 2 and be.state_cache.stats()["entries"] == 2
+    assert be.state_cache.stats()["prefix_hits"] == 2 and be.state_cache.stats()["entries"] == 2
 
 
 def test_block_fp8_serves_without_the_state_cache(capsys):
@@ -366,15 +366,48 @@ def test_longest_gives_an_8bit_entry_in_its_dtype_to_usable_and_the_caller():
 
 def test_longest_takes_usable_and_use_together():
     """#56's usable() and #50's use() in one lookup: usable() rejects a match the caller's keys / values cannot continue,
-    the next-longest one is returned, and a prefix hit is counted only when use(key) says the caller continues it."""
+    the next-longest one is returned, and a prefix hit is counted only when use(key, m, n) says the caller
+    reuses it."""
     c = StateCache(1 << 30)
     base = list(range(600))
     long_, short = base + list(range(1000, 1300)), base + list(range(2000, 2100))
     for toks in (long_, short):
         c.put(c.key(toks), [(torch.zeros(1, len(toks), 4), torch.zeros(1, len(toks), 4))], tokens=toks)
     query = long_[:700] + [7] * 50
-    found = c.longest(query, usable=lambda kv, m, n: n != len(long_), use=lambda key: False)
+    found = c.longest(query, usable=lambda kv, m, n: n != len(long_), use=lambda *_: False)
     assert found is not None and found[0] == c.key(short) and found[2] == 600 and c.prefix_hits == 0
-    found = c.longest(query, usable=lambda kv, m, n: True, use=lambda key: True)
+    found = c.longest(query, usable=lambda kv, m, n: True, use=lambda *_: True)
     assert found[0] == c.key(long_) and found[2] == 700 and c.prefix_hits == 1
     assert c.longest(query)[0] == c.key(long_) and c.prefix_hits == 2
+
+
+def test_use_receives_the_match_and_counts_only_a_reused_prefix():
+    """use(key, matched length, state length): a caller whose acceptance test depends on the match itself can say
+    whether it reuses the entry, so prefix_hits counts prefixes reused and not matches found. The match is returned
+    either way, and without the hook it is counted as before."""
+    c = StateCache(1 << 30)
+    long_ = list(range(700))
+    c.put(c.key(long_), [(torch.zeros(1, len(long_), 4), torch.zeros(1, len(long_), 4))], tokens=long_)
+    root = long_[:600]                                       # the whole root is this entry's prefix
+    seen = []
+    found = c.longest(root, use=lambda *a: seen.append(a) or False)
+    assert found is not None and found[0] == c.key(long_) and found[2] == 600 and found[3] == 700
+    assert seen == [(c.key(long_), 600, 700)]                # the entry's key, the match, the entry's length
+    assert c.prefix_hits == 0                                # declined: found, not reused
+    assert c.longest(root, use=lambda *_: True) is not None and c.prefix_hits == 1
+    assert c.longest(root) is not None and c.prefix_hits == 2  # no hook: counted, as before
+
+
+def test_a_match_the_graph_engine_does_not_continue_is_not_a_prefix_hit():
+    """A root that a cached entry holds whole has no tokens left to continue, so _extend_states does not reuse the
+    match and it is not a prefix hit. (The guard that rejects it is not this test's subject: only the count is.)"""
+    rnd = random.Random(3)
+    be = Stub(tiny())
+    be.state_cache = StateCache(1e9)
+    be.state_cache.BLOCK = 4
+    long_ = [1] + [rnd.randrange(3, 50) for _ in range(39)]
+    check(be, requests(rnd, long_, 1))
+    assert be.state_cache.stats()["prefix_hits"] == 0
+    assert be.state_cache.longest(long_[:20], use=lambda *_: False) is not None  # the entry holds the root whole
+    check(be, requests(rnd, long_[:20], 1))                  # a whole prefix of the cached state
+    assert be.state_cache.stats()["prefix_hits"] == 0
