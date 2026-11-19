@@ -2218,18 +2218,18 @@ class GraphBackend(EagerBackend):
                 continue
             pk = units[k][0]
             root = list(pk[0][: pk[2].index(1)])
-            # a prefix hit is a prefix reused, so only the continuation below is counted (keep in sync with its
-            # guard): a match of the whole root has no tokens left to continue, and an entry an earlier unit of this
-            # call cached is an exact hit, not a prefix one
+            # the one condition under which the continuation below reuses the entry: it is both the guard and what
+            # counts the prefix hit, so a prefix hit is a prefix reused. A match of the whole root has no tokens left
+            # to continue, which covers an entry an earlier unit of this call cached.
             reuses = lambda _key, match, _total: self.state_cache.BLOCK <= match < len(root)
             found = self.state_cache.longest(root, usable=self._usable if self.gemma is not None else None, use=reuses)
             if found is None:
                 continue
             old, kv, m, n = found
-            if old == key:  # cached by an earlier unit of this call
+            if old == key:  # cached by an earlier unit of this call; _cache_keys counted that lookup as a miss
                 hits[k] = kv
                 continue
-            if m < self.state_cache.BLOCK or m >= len(root):
+            if not reuses(old, m, n):
                 continue
             prefix = []
             for (ck, cv), t in zip(kv, self.gemma.kv_lens(n) if self.gemma is not None else [n] * len(kv)):
@@ -4206,15 +4206,27 @@ class MLXBackend(Capable):
         kv = cache.get(key)
         if kv is not None:
             return kv
-        initial, replaces = None, None
-        # counted when this request reuses the entry: the bits match and the root has tokens past it (keep in sync
-        # with the test below)
-        found = cache.longest(root, use=lambda old_key, m, n: same_bits(old_key) and cache.BLOCK <= m < len(root))
+        initial, replaces, reused = None, None, False
+
+        def continues(match):
+            """Whether the root has tokens past the match, so continuing the entry is shorter than computing the
+            root afresh (below BLOCK tokens the cache does not match at all)."""
+            return cache.BLOCK <= match < len(root)
+
+        def reuses(old_key, match, _total):
+            """Whether this request continues the entry, which is what a prefix hit counts: its rows must have the
+            bits this request's uncached forward gives them. same_bits is asked here, under the cache's lock, and
+            its answer is read below instead of asking again."""
+            nonlocal reused
+            reused = same_bits(old_key) and continues(match)
+            return reused
+
+        found = cache.longest(root, use=reuses)
         if found is not None:
             old, pkv, m, n = found
-            if cache.BLOCK <= m < len(root):
+            if continues(m):
                 replaces = old if m == n else None
-                if same_bits(old):
+                if reused:
                     initial = [(k[..., :m, :], v[..., :m, :]) for k, v in pkv]
         kv = [(mx.contiguous(k), mx.contiguous(v)) for k, v in self._prefix(root, initial, ref)]
         mx.eval(kv)
