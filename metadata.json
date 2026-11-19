@@ -1,0 +1,43 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M7SW39NM4MXB27S87AKN2DBK",
+  "strategy": "manual-commit",
+  "branch": "fix/prefix-hits-count-reused-only",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "basal/engine.py",
+    "basal/gdn_graph.py",
+    "tests/test_recurrent.py",
+    "tests/test_state_cache.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 696,
+    "cache_creation_tokens": 1020723,
+    "cache_read_tokens": 118621168,
+    "output_tokens": 320276,
+    "api_call_count": 348
+  },
+  "redaction": {
+    "replacements": 6,
+    "layers": {
+      "betterleaks": 4,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 2,
+      "credentialed_uri": 0,
+      "entropy": 4,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
