@@ -1283,8 +1283,10 @@ class StateCache:
 
     def longest(self, tokens, usable=None, use=None):
         """The longest cached prefix -> (key, KV, matched length, state length), or None.
-        usable(KV, matched length, state length) may reject a match whose KV cannot continue it. use(key): whether the
-        caller will continue the found entry (a prefix hit is counted only then; default: yes)."""
+        usable(KV, matched length, state length) may reject a match whose KV cannot continue it.
+        use(key, matched length, state length): whether the caller will reuse the found entry (a prefix hit is counted
+        only then; default: yes). It takes the match, because what a caller reuses depends on it: the counter then
+        reports prefixes reused rather than matches found."""
         t = np.asarray(tokens, dtype=np.int64)
         blocks = self._blocks(t)
         rejected = set() if usable is not None else ()
@@ -1319,7 +1321,7 @@ class StateCache:
                             break
                 if best is not None:
                     self.entries.move_to_end(best[0])
-                    self.prefix_hits += use is None or bool(use(best[0]))
+                    self.prefix_hits += use is None or bool(use(best[0], best[2], best[3]))
                     break
             else:
                 return None
@@ -2216,7 +2218,11 @@ class GraphBackend(EagerBackend):
                 continue
             pk = units[k][0]
             root = list(pk[0][: pk[2].index(1)])
-            found = self.state_cache.longest(root, self._usable if self.gemma is not None else None)
+            # a prefix hit is a prefix reused, so only the continuation below is counted (keep in sync with its
+            # guard): a match of the whole root has no tokens left to continue, and an entry an earlier unit of this
+            # call cached is an exact hit, not a prefix one
+            reuses = lambda _key, match, _total: self.state_cache.BLOCK <= match < len(root)
+            found = self.state_cache.longest(root, usable=self._usable if self.gemma is not None else None, use=reuses)
             if found is None:
                 continue
             old, kv, m, n = found
@@ -4201,7 +4207,9 @@ class MLXBackend(Capable):
         if kv is not None:
             return kv
         initial, replaces = None, None
-        found = cache.longest(root, use=same_bits)
+        # counted when this request reuses the entry: the bits match and the root has tokens past it (keep in sync
+        # with the test below)
+        found = cache.longest(root, use=lambda old_key, m, n: same_bits(old_key) and cache.BLOCK <= m < len(root))
         if found is not None:
             old, pkv, m, n = found
             if cache.BLOCK <= m < len(root):

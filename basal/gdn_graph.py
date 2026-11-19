@@ -1220,7 +1220,13 @@ class GDNGraphBackend(GraphBackend):
                 continue
             pk = units[k][0]
             root = list(pk[0][: pk[2].index(1)])
-            found = self.state_cache.longest(root)
+            # a prefix hit is a prefix reused, so only the continuation below is counted (keep in sync with its
+            # guard): a recurrent state exists only after an entry's last token, so a match that ends inside one
+            # cannot be continued and is found without being counted; an entry an earlier unit of this call cached is
+            # an exact hit, not a prefix one
+            reuses = lambda _key, match, total: (
+                match == total and total < len(root) and len(root) - total <= self.CONTINUE_MAX)
+            found = self.state_cache.longest(root, use=reuses)
             if found is None:
                 continue
             old, e, m, n = found

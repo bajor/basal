@@ -202,6 +202,25 @@ def test_a_growing_state_is_continued_only_with_the_same_bits(tmp_path, forward,
             assert got == plain.run_shared([([s2 + x for x in q], lids)])[0]
 
 
+@FORWARDS
+def test_a_root_a_cached_state_holds_whole_is_not_a_prefix_hit(tmp_path, forward):
+    """A root that a longer cached entry holds whole has no tokens left to continue, so _state computes it afresh and
+    the match is not a prefix hit: the counter reports prefixes reused, not matches found. The bits match here, so
+    what rejects the match is the root ending inside the entry and not same_bits."""
+    pytest.importorskip("mlx.core")
+    tiny_llama(tmp_path)
+    rnd = random.Random(5)
+    long_ = [rnd.randrange(1, 64) for _ in range(300)]
+    q, lids = [[5, 6, 10, 11], [5, 6, 11, 10]], [[10, 11], [10, 11]]
+    be = cached_stub(tmp_path, forward=forward, continuing=True)   # the bits of both row counts the same
+    be.run_shared([([long_ + x for x in q], lids, len(long_))])
+    assert be.state_cache.stats()["prefix_hits"] == 0
+    short = long_[:256]                                            # a whole prefix of the cached state (one block)
+    be.run_shared([([short + x for x in q], lids, len(short))])
+    st = be.state_cache.stats()
+    assert st["entries"] == 2 and st["prefix_hits"] == 0
+
+
 def test_kernel_rows_finds_where_the_row_count_stops_mattering():
     """_kernel_rows bisects for the fewest rows from which a product gives each row the bits it has at PROBE_ROWS rows
     (a fake kernel that sums in another order below 100 rows), and gives None when no such boundary checks out."""
